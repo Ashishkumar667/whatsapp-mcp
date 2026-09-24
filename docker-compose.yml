@@ -1,0 +1,30 @@
+# Local/dev convenience stack: the single app image (bridge + MCP server) plus
+# a throwaway local MongoDB. For on-demand.io, deploy the root Dockerfile as
+# one service and point MONGODB_URI at your own Atlas (or other managed
+# MongoDB) cluster instead of the `mongo` service below.
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DATABASE: whatsapp_mcp
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:?set INTERNAL_API_SECRET in .env}
+    volumes:
+      - bridge-store:/app/bridge/store
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongo
+
+volumes:
+  mongo-data:
+  bridge-store:
