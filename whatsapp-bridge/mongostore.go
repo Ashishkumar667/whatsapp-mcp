@@ -59,9 +59,17 @@ func (m *MongoStore) Close(ctx context.Context) error {
 }
 
 func (m *MongoStore) ensureIndexes(ctx context.Context) error {
-	if _, err := m.chats.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "session_id", Value: 1}, {Key: "jid", Value: 1}},
-		Options: options.Index().SetUnique(true),
+	if _, err := m.chats.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys:    bson.D{{Key: "session_id", Value: 1}, {Key: "jid", Value: 1}},
+			Options: options.Index().SetUnique(true),
+		},
+		{
+			// Privacy/retention: chats auto-delete this long after they were last
+			// touched, unless a user calls forget_me sooner.
+			Keys:    bson.D{{Key: "stored_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(dataTTLSeconds),
+		},
 	}); err != nil {
 		return err
 	}
@@ -77,12 +85,22 @@ func (m *MongoStore) ensureIndexes(ctx context.Context) error {
 		{
 			Keys: bson.D{{Key: "content", Value: "text"}},
 		},
+		{
+			// Same retention policy as chats - see above.
+			Keys:    bson.D{{Key: "stored_at", Value: 1}},
+			Options: options.Index().SetExpireAfterSeconds(dataTTLSeconds),
+		},
 	}); err != nil {
 		return err
 	}
 
 	return nil
 }
+
+// dataTTLSeconds bounds how long chat/message documents are kept: 2 hours by
+// default, so a user who never calls forget_me still isn't left with their
+// WhatsApp history sitting in this database indefinitely.
+const dataTTLSeconds int32 = 2 * 60 * 60
 
 // --- Chats & messages (written by the Go bridge, read by the Python MCP server) ---
 
@@ -91,6 +109,7 @@ type chatDoc struct {
 	JID             string    `bson:"jid"`
 	Name            string    `bson:"name"`
 	LastMessageTime time.Time `bson:"last_message_time"`
+	StoredAt        time.Time `bson:"stored_at"`
 }
 
 type messageDoc struct {
@@ -108,12 +127,13 @@ type messageDoc struct {
 	FileSHA256    []byte    `bson:"file_sha256,omitempty"`
 	FileEncSHA256 []byte    `bson:"file_enc_sha256,omitempty"`
 	FileLength    uint64    `bson:"file_length,omitempty"`
+	StoredAt      time.Time `bson:"stored_at"`
 }
 
 func (m *MongoStore) StoreChat(ctx context.Context, sessionID, jid, name string, lastMessageTime time.Time) error {
 	_, err := m.chats.UpdateOne(ctx,
 		bson.M{"session_id": sessionID, "jid": jid},
-		bson.M{"$set": chatDoc{SessionID: sessionID, JID: jid, Name: name, LastMessageTime: lastMessageTime}},
+		bson.M{"$set": chatDoc{SessionID: sessionID, JID: jid, Name: name, LastMessageTime: lastMessageTime, StoredAt: time.Now()}},
 		options.UpdateOne().SetUpsert(true),
 	)
 	return err
@@ -125,12 +145,26 @@ func (m *MongoStore) StoreMessage(ctx context.Context, sessionID, id, chatJID, s
 		return nil
 	}
 
+	encMediaKey, err := encryptBytes(mediaKey)
+	if err != nil {
+		return err
+	}
+	encFileSHA256, err := encryptBytes(fileSHA256)
+	if err != nil {
+		return err
+	}
+	encFileEncSHA256, err := encryptBytes(fileEncSHA256)
+	if err != nil {
+		return err
+	}
+
 	doc := messageDoc{
 		SessionID: sessionID, ID: id, ChatJID: chatJID, Sender: sender, Content: content,
 		Timestamp: timestamp, IsFromMe: isFromMe, MediaType: mediaType, Filename: filename,
-		URL: url, MediaKey: mediaKey, FileSHA256: fileSHA256, FileEncSHA256: fileEncSHA256, FileLength: fileLength,
+		URL: url, MediaKey: encMediaKey, FileSHA256: encFileSHA256, FileEncSHA256: encFileEncSHA256,
+		FileLength: fileLength, StoredAt: time.Now(),
 	}
-	_, err := m.messages.UpdateOne(ctx,
+	_, err = m.messages.UpdateOne(ctx,
 		bson.M{"session_id": sessionID, "chat_jid": chatJID, "id": id},
 		bson.M{"$set": doc},
 		options.UpdateOne().SetUpsert(true),
@@ -152,11 +186,24 @@ func (m *MongoStore) GetChatName(ctx context.Context, sessionID, chatJID string)
 }
 
 func (m *MongoStore) StoreMediaInfo(ctx context.Context, sessionID, id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
-	_, err := m.messages.UpdateOne(ctx,
+	encMediaKey, err := encryptBytes(mediaKey)
+	if err != nil {
+		return err
+	}
+	encFileSHA256, err := encryptBytes(fileSHA256)
+	if err != nil {
+		return err
+	}
+	encFileEncSHA256, err := encryptBytes(fileEncSHA256)
+	if err != nil {
+		return err
+	}
+
+	_, err = m.messages.UpdateOne(ctx,
 		bson.M{"session_id": sessionID, "chat_jid": chatJID, "id": id},
 		bson.M{"$set": bson.M{
-			"url": url, "media_key": mediaKey, "file_sha256": fileSHA256,
-			"file_enc_sha256": fileEncSHA256, "file_length": fileLength,
+			"url": url, "media_key": encMediaKey, "file_sha256": encFileSHA256,
+			"file_enc_sha256": encFileEncSHA256, "file_length": fileLength,
 		}},
 	)
 	return err
@@ -171,7 +218,20 @@ func (m *MongoStore) GetMediaInfo(ctx context.Context, sessionID, id, chatJID st
 		}
 		return
 	}
-	return doc.MediaType, doc.Filename, doc.URL, doc.MediaKey, doc.FileSHA256, doc.FileEncSHA256, doc.FileLength, nil
+
+	mediaKey, err = decryptBytes(doc.MediaKey)
+	if err != nil {
+		return
+	}
+	fileSHA256, err = decryptBytes(doc.FileSHA256)
+	if err != nil {
+		return
+	}
+	fileEncSHA256, err = decryptBytes(doc.FileEncSHA256)
+	if err != nil {
+		return
+	}
+	return doc.MediaType, doc.Filename, doc.URL, mediaKey, fileSHA256, fileEncSHA256, doc.FileLength, nil
 }
 
 // --- Session registry (tenant records) ---

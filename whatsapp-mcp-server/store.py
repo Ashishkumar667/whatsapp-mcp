@@ -2,8 +2,10 @@
 
 The Go bridge (whatsapp-bridge) owns writes to the `sessions`, `chats`, and
 `messages` collections. This module gives the Python MCP server read access
-to `chats`/`messages` (for the read-oriented tools) and both read/write access
-to `sessions` (to mint API tokens for newly linked WhatsApp accounts).
+to `chats`/`messages` (for the read-oriented tools, and for forget_me's
+deletes) and both read/write access to `sessions` (to mint API tokens for
+newly linked WhatsApp accounts). It also owns `cloud_uploads`, which tracks
+Cloudinary uploads for this server's own TTL cleanup - see cloud_storage.py.
 """
 import os
 from datetime import datetime
@@ -39,6 +41,10 @@ def chats() -> Collection:
 
 def messages() -> Collection:
     return _db()["messages"]
+
+
+def cloud_uploads() -> Collection:
+    return _db()["cloud_uploads"]
 
 
 def to_datetime(value) -> Optional[datetime]:

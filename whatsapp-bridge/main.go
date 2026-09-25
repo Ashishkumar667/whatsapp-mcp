@@ -34,6 +34,15 @@ func main() {
 		logger.Errorf("INTERNAL_API_SECRET must be set (shared secret between this bridge and the MCP server)")
 		return
 	}
+	if err := SetMediaEncryptionKey(os.Getenv("MEDIA_ENCRYPTION_KEY")); err != nil {
+		logger.Errorf("%v", err)
+		return
+	}
+	if mediaEncryptionEnabled() {
+		logger.Infof("Media decryption keys will be encrypted at rest (MEDIA_ENCRYPTION_KEY set)")
+	} else {
+		logger.Warnf("MEDIA_ENCRYPTION_KEY not set - media decryption keys will be stored in plain form")
+	}
 	mongoURI := getenv("MONGODB_URI", "mongodb://localhost:27017")
 	mongoDB := getenv("MONGODB_DATABASE", "whatsapp_mcp")
 	port := getenv("PORT", "8080")
