@@ -1,3 +1,4 @@
+import os
 import os.path
 import re
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ from typing import List, Optional, Tuple
 
 import audio
 import bridge
+import media_fetch
 import store
 
 WHATSAPP_MEDIA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge')
@@ -358,37 +360,60 @@ def send_message(session_id: str, recipient: str, message: str) -> Tuple[bool, s
         return False, f"Unexpected error: {str(e)}"
 
 
-def send_file(session_id: str, recipient: str, media_path: str) -> Tuple[bool, str]:
+def _resolve_media_path(media_path: Optional[str], media_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Returns (path_to_send, temp_path_to_clean_up_afterward)."""
+    if media_url:
+        temp_path = media_fetch.download_to_temp(media_url)
+        return temp_path, temp_path
+    return media_path, None
+
+
+def send_file(session_id: str, recipient: str, media_path: Optional[str] = None, media_url: Optional[str] = None) -> Tuple[bool, str]:
     if not recipient:
         return False, "Recipient must be provided"
-    if not media_path:
-        return False, "Media path must be provided"
-    if not os.path.isfile(media_path):
-        return False, f"Media file not found: {media_path}"
+    if not media_path and not media_url:
+        return False, "Either media_path or media_url must be provided"
+
+    temp_path = None
     try:
+        media_path, temp_path = _resolve_media_path(media_path, media_url)
+        if not os.path.isfile(media_path):
+            return False, f"Media file not found: {media_path}"
         return bridge.send(session_id, recipient, media_path=media_path)
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
-def send_audio_message(session_id: str, recipient: str, media_path: str) -> Tuple[bool, str]:
+def send_audio_message(session_id: str, recipient: str, media_path: Optional[str] = None, media_url: Optional[str] = None) -> Tuple[bool, str]:
     if not recipient:
         return False, "Recipient must be provided"
-    if not media_path:
-        return False, "Media path must be provided"
-    if not os.path.isfile(media_path):
-        return False, f"Media file not found: {media_path}"
+    if not media_path and not media_url:
+        return False, "Either media_path or media_url must be provided"
 
-    if not media_path.endswith(".ogg"):
-        try:
-            media_path = audio.convert_to_opus_ogg_temp(media_path)
-        except Exception as e:
-            return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
-
+    temp_path = None
     try:
+        media_path, temp_path = _resolve_media_path(media_path, media_url)
+        if not os.path.isfile(media_path):
+            return False, f"Media file not found: {media_path}"
+
+        if not media_path.endswith(".ogg"):
+            try:
+                converted_path = audio.convert_to_opus_ogg_temp(media_path)
+            except Exception as e:
+                return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            media_path = temp_path = converted_path
+
         return bridge.send(session_id, recipient, media_path=media_path)
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def download_media(session_id: str, message_id: str, chat_jid: str) -> Optional[str]:

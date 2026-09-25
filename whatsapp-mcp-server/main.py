@@ -1,3 +1,4 @@
+import dataclasses
 import os
 from typing import Any, Dict, List, Optional
 
@@ -5,7 +6,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 import auth
 import bridge
-import qr_image
+import cloud_storage
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -31,6 +32,14 @@ mcp = FastMCP(
 )
 
 
+def _asdict(obj: Any) -> Optional[Dict[str, Any]]:
+    """Convert a whatsapp.py dataclass (Chat, Contact, ...) into a plain dict for MCP's
+    output-schema validation, which rejects raw dataclass instances."""
+    if obj is None:
+        return None
+    return dataclasses.asdict(obj)
+
+
 def _qr_fields(session_id: str, qr_png_base64: Optional[str]) -> Dict[str, Any]:
     """Prefer a hosted image URL (via Cloudinary) over inlining base64 PNG data.
 
@@ -38,7 +47,7 @@ def _qr_fields(session_id: str, qr_png_base64: Optional[str]) -> Dict[str, Any]:
     """
     if not qr_png_base64:
         return {}
-    image_url = qr_image.upload_qr(qr_png_base64, session_id)
+    image_url = cloud_storage.upload_qr(qr_png_base64, session_id)
     if image_url:
         return {"qr_image_url": image_url}
     return {"qr_png_base64": qr_png_base64}
@@ -99,7 +108,7 @@ def search_contacts(ctx: Context, query: str) -> List[Dict[str, Any]]:
     """
     session_id = auth.resolve_session_id(ctx)
     contacts = whatsapp_search_contacts(session_id, query)
-    return contacts
+    return [_asdict(c) for c in contacts]
 
 
 @mcp.tool()
@@ -173,11 +182,11 @@ def list_chats(
         include_last_message=include_last_message,
         sort_by=sort_by
     )
-    return chats
+    return [_asdict(c) for c in chats]
 
 
 @mcp.tool()
-def get_chat(ctx: Context, chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
+def get_chat(ctx: Context, chat_jid: str, include_last_message: bool = True) -> Optional[Dict[str, Any]]:
     """Get WhatsApp chat metadata by JID.
 
     Args:
@@ -185,18 +194,18 @@ def get_chat(ctx: Context, chat_jid: str, include_last_message: bool = True) -> 
         include_last_message: Whether to include the last message (default True)
     """
     session_id = auth.resolve_session_id(ctx)
-    return whatsapp_get_chat(session_id, chat_jid, include_last_message)
+    return _asdict(whatsapp_get_chat(session_id, chat_jid, include_last_message))
 
 
 @mcp.tool()
-def get_direct_chat_by_contact(ctx: Context, sender_phone_number: str) -> Dict[str, Any]:
+def get_direct_chat_by_contact(ctx: Context, sender_phone_number: str) -> Optional[Dict[str, Any]]:
     """Get WhatsApp chat metadata by sender phone number.
 
     Args:
         sender_phone_number: The phone number to search for
     """
     session_id = auth.resolve_session_id(ctx)
-    return whatsapp_get_direct_chat_by_contact(session_id, sender_phone_number)
+    return _asdict(whatsapp_get_direct_chat_by_contact(session_id, sender_phone_number))
 
 
 @mcp.tool()
@@ -209,7 +218,8 @@ def get_contact_chats(ctx: Context, jid: str, limit: int = 20, page: int = 0) ->
         page: Page number for pagination (default 0)
     """
     session_id = auth.resolve_session_id(ctx)
-    return whatsapp_get_contact_chats(session_id, jid, limit, page)
+    chats = whatsapp_get_contact_chats(session_id, jid, limit, page)
+    return [_asdict(c) for c in chats]
 
 
 @mcp.tool()
@@ -238,7 +248,7 @@ def get_message_context(
         after: Number of messages to include after the target message (default 5)
     """
     session_id = auth.resolve_session_id(ctx)
-    return whatsapp_get_message_context(session_id, message_id, before, after)
+    return _asdict(whatsapp_get_message_context(session_id, message_id, before, after))
 
 
 @mcp.tool()
@@ -262,56 +272,73 @@ def send_message(ctx: Context, recipient: str, message: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def send_file(ctx: Context, recipient: str, media_path: str) -> Dict[str, Any]:
+def send_file(ctx: Context, recipient: str, media_url: Optional[str] = None, media_path: Optional[str] = None) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the media file to send (image, video, document)
+        media_url: A public URL to the media file to send (image, video, document) - use this,
+                 since this server runs remotely and can't see your local filesystem
+        media_path: A path on the server's own filesystem (only useful when running this
+                 server locally yourself). Provide media_url instead if you have one.
 
     Returns:
         A dictionary containing success status and a status message
     """
     session_id = auth.resolve_session_id(ctx)
-    success, status_message = whatsapp_send_file(session_id, recipient, media_path)
+    success, status_message = whatsapp_send_file(session_id, recipient, media_path=media_path, media_url=media_url)
     return {"success": success, "message": status_message}
 
 
 @mcp.tool()
-def send_audio_message(ctx: Context, recipient: str, media_path: str) -> Dict[str, Any]:
+def send_audio_message(ctx: Context, recipient: str, media_url: Optional[str] = None, media_path: Optional[str] = None) -> Dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
+        media_url: A public URL to the audio file to send (will be converted to Opus .ogg if it
+                 isn't already) - use this, since this server runs remotely and can't see your
+                 local filesystem
+        media_path: A path on the server's own filesystem (only useful when running this
+                 server locally yourself). Provide media_url instead if you have one.
 
     Returns:
         A dictionary containing success status and a status message
     """
     session_id = auth.resolve_session_id(ctx)
-    success, status_message = whatsapp_audio_voice_message(session_id, recipient, media_path)
+    success, status_message = whatsapp_audio_voice_message(session_id, recipient, media_path=media_path, media_url=media_url)
     return {"success": success, "message": status_message}
 
 
 @mcp.tool()
 def download_media(ctx: Context, message_id: str, chat_jid: str) -> Dict[str, Any]:
-    """Download media from a WhatsApp message and get the local file path.
+    """Download media from a WhatsApp message and get a link to it.
 
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
 
     Returns:
-        A dictionary containing success status, a status message, and the file path if successful
+        A dictionary containing success status, a status message, and (if successful)
+        media_url - a public link to the downloaded file.
     """
     session_id = auth.resolve_session_id(ctx)
     file_path = whatsapp_download_media(session_id, message_id, chat_jid)
 
-    if file_path:
-        return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
-    return {"success": False, "message": "Failed to download media"}
+    if not file_path:
+        return {"success": False, "message": "Failed to download media"}
+
+    media_url = cloud_storage.upload_file(file_path, public_id=f"{session_id}/{message_id}")
+    result = {"success": True, "message": "Media downloaded successfully"}
+    if media_url:
+        result["media_url"] = media_url
+    else:
+        # Cloudinary isn't configured - fall back to the path inside this container,
+        # only useful if you have direct access to it (e.g. running locally).
+        result["file_path"] = file_path
+    return result
 
 
 if __name__ == "__main__":
