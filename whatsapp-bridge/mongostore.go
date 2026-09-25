@@ -123,6 +123,7 @@ type messageDoc struct {
 	MediaType     string    `bson:"media_type,omitempty"`
 	Filename      string    `bson:"filename,omitempty"`
 	URL           string    `bson:"url,omitempty"`
+	DirectPath    string    `bson:"direct_path,omitempty"`
 	MediaKey      []byte    `bson:"media_key,omitempty"`
 	FileSHA256    []byte    `bson:"file_sha256,omitempty"`
 	FileEncSHA256 []byte    `bson:"file_enc_sha256,omitempty"`
@@ -140,7 +141,7 @@ func (m *MongoStore) StoreChat(ctx context.Context, sessionID, jid, name string,
 }
 
 func (m *MongoStore) StoreMessage(ctx context.Context, sessionID, id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	mediaType, filename, url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	if content == "" && mediaType == "" {
 		return nil
 	}
@@ -161,7 +162,7 @@ func (m *MongoStore) StoreMessage(ctx context.Context, sessionID, id, chatJID, s
 	doc := messageDoc{
 		SessionID: sessionID, ID: id, ChatJID: chatJID, Sender: sender, Content: content,
 		Timestamp: timestamp, IsFromMe: isFromMe, MediaType: mediaType, Filename: filename,
-		URL: url, MediaKey: encMediaKey, FileSHA256: encFileSHA256, FileEncSHA256: encFileEncSHA256,
+		URL: url, DirectPath: directPath, MediaKey: encMediaKey, FileSHA256: encFileSHA256, FileEncSHA256: encFileEncSHA256,
 		FileLength: fileLength, StoredAt: time.Now(),
 	}
 	_, err = m.messages.UpdateOne(ctx,
@@ -185,31 +186,7 @@ func (m *MongoStore) GetChatName(ctx context.Context, sessionID, chatJID string)
 	return doc.Name, nil
 }
 
-func (m *MongoStore) StoreMediaInfo(ctx context.Context, sessionID, id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
-	encMediaKey, err := encryptBytes(mediaKey)
-	if err != nil {
-		return err
-	}
-	encFileSHA256, err := encryptBytes(fileSHA256)
-	if err != nil {
-		return err
-	}
-	encFileEncSHA256, err := encryptBytes(fileEncSHA256)
-	if err != nil {
-		return err
-	}
-
-	_, err = m.messages.UpdateOne(ctx,
-		bson.M{"session_id": sessionID, "chat_jid": chatJID, "id": id},
-		bson.M{"$set": bson.M{
-			"url": url, "media_key": encMediaKey, "file_sha256": encFileSHA256,
-			"file_enc_sha256": encFileEncSHA256, "file_length": fileLength,
-		}},
-	)
-	return err
-}
-
-func (m *MongoStore) GetMediaInfo(ctx context.Context, sessionID, id, chatJID string) (mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64, err error) {
+func (m *MongoStore) GetMediaInfo(ctx context.Context, sessionID, id, chatJID string) (mediaType, filename, url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64, err error) {
 	var doc messageDoc
 	err = m.messages.FindOne(ctx, bson.M{"session_id": sessionID, "chat_jid": chatJID, "id": id}).Decode(&doc)
 	if err != nil {
@@ -231,7 +208,7 @@ func (m *MongoStore) GetMediaInfo(ctx context.Context, sessionID, id, chatJID st
 	if err != nil {
 		return
 	}
-	return doc.MediaType, doc.Filename, doc.URL, mediaKey, fileSHA256, fileEncSHA256, doc.FileLength, nil
+	return doc.MediaType, doc.Filename, doc.URL, doc.DirectPath, mediaKey, fileSHA256, fileEncSHA256, doc.FileLength, nil
 }
 
 // --- Session registry (tenant records) ---

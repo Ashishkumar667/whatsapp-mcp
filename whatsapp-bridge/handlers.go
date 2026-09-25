@@ -179,21 +179,24 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 }
 
 // extractMediaInfo pulls the media metadata whatsmeow needs to later download the file.
-func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+// directPath comes straight from the message's own DirectPath field - it must NOT be
+// re-derived by parsing the URL later, since WhatsApp's CDN rejects a reconstructed
+// path that doesn't exactly match the one the server issued (403 Forbidden).
+func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, directPath string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
-		return "", "", "", nil, nil, nil, 0
+		return "", "", "", "", nil, nil, nil, 0
 	}
 	if img := msg.GetImageMessage(); img != nil {
 		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
-			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
+			img.GetURL(), img.GetDirectPath(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 	if vid := msg.GetVideoMessage(); vid != nil {
 		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
-			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
+			vid.GetURL(), vid.GetDirectPath(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 	if aud := msg.GetAudioMessage(); aud != nil {
 		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
-			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
+			aud.GetURL(), aud.GetDirectPath(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		filename := doc.GetFileName()
@@ -201,9 +204,9 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 			filename = "document_" + time.Now().Format("20060102_150405")
 		}
 		return "document", filename,
-			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
+			doc.GetURL(), doc.GetDirectPath(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
 	}
-	return "", "", "", nil, nil, nil, 0
+	return "", "", "", "", nil, nil, nil, 0
 }
 
 // handleMessage persists an incoming/outgoing message event for the owning session.
@@ -219,14 +222,14 @@ func handleMessage(sessionID string, client *whatsmeow.Client, mongoStore *Mongo
 	}
 
 	content := extractTextContent(msg.Message)
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+	mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
 
 	if content == "" && mediaType == "" {
 		return
 	}
 
 	err := mongoStore.StoreMessage(ctx, sessionID, msg.Info.ID, chatJID, sender, content, msg.Info.Timestamp, msg.Info.IsFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength)
+		mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength)
 	if err != nil {
 		logger.Warnf("[%s] Failed to store message: %v", sessionID, err)
 		return
@@ -266,7 +269,7 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType { return d.MediaTyp
 // downloadMedia fetches (or returns an already-downloaded) media file for a session's message.
 // Files are namespaced under store/<sessionID>/... so tenants sharing the same volume can't collide.
 func downloadMedia(ctx context.Context, sessionID string, client *whatsmeow.Client, mongoStore *MongoStore, messageID, chatJID string) (bool, string, string, string, error) {
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err := mongoStore.GetMediaInfo(ctx, sessionID, messageID, chatJID)
+	mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength, err := mongoStore.GetMediaInfo(ctx, sessionID, messageID, chatJID)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to find message: %v", err)
 	}
@@ -293,7 +296,11 @@ func downloadMedia(ctx context.Context, sessionID string, client *whatsmeow.Clie
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
 	}
 
-	directPath := extractDirectPathFromURL(url)
+	if directPath == "" {
+		// Legacy data stored before this field was captured - best-effort fallback,
+		// though WhatsApp's CDN may reject a reconstructed path with a 403.
+		directPath = extractDirectPathFromURL(url)
+	}
 
 	var waMediaType whatsmeow.MediaType
 	switch mediaType {
@@ -442,11 +449,11 @@ func handleHistorySync(sessionID string, client *whatsmeow.Client, mongoStore *M
 				}
 			}
 
-			var mediaType, filename, url string
+			var mediaType, filename, url, directPath string
 			var mediaKey, fileSHA256, fileEncSHA256 []byte
 			var fileLength uint64
 			if msg.Message.Message != nil {
-				mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
+				mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
 			}
 
 			if content == "" && mediaType == "" {
@@ -483,7 +490,7 @@ func handleHistorySync(sessionID string, client *whatsmeow.Client, mongoStore *M
 			}
 
 			err = mongoStore.StoreMessage(ctx, sessionID, msgID, chatJID, sender, content, msgTimestamp, isFromMe,
-				mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength)
+				mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength)
 			if err != nil {
 				logger.Warnf("[%s] Failed to store history message: %v", sessionID, err)
 			} else {
