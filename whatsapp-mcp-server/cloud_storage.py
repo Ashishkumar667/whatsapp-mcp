@@ -1,7 +1,10 @@
-"""Uploads the bridge's base64 QR code PNG to Cloudinary and hands back a URL.
+"""Cloudinary helpers shared by QR code images and downloaded WhatsApp media.
 
-Falls back to returning the raw base64 PNG if CLOUDINARY_URL isn't configured,
-so this stays optional rather than a hard dependency for local/dev use.
+Both exist for the same reason: this server runs remotely, so neither a raw
+base64 blob nor a path inside the container's filesystem is something a
+caller can actually use - they need a public URL. Falls back to the raw
+data/local path if CLOUDINARY_URL isn't configured, so this stays optional
+rather than a hard dependency for local/dev use.
 """
 import os
 from typing import Optional
@@ -41,4 +44,23 @@ def upload_qr(png_base64: str, session_id: str) -> Optional[str]:
         return result.get("secure_url")
     except Exception as e:
         print(f"Cloudinary QR upload failed: {e}")
+        return None
+
+
+def upload_file(local_path: str, public_id: str) -> Optional[str]:
+    """Upload a downloaded media file (image/video/audio/document) and return its public URL,
+    or None if unconfigured/failed."""
+    if not local_path or not _ensure_configured():
+        return None
+    try:
+        result = cloudinary.uploader.upload(
+            local_path,
+            public_id=public_id,
+            folder="whatsapp-mcp-media",
+            resource_type="auto",
+            overwrite=True,
+        )
+        return result.get("secure_url")
+    except Exception as e:
+        print(f"Cloudinary media upload failed: {e}")
         return None
