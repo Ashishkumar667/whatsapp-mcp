@@ -7,6 +7,7 @@ from mcp.server.fastmcp import Context, FastMCP
 import auth
 import bridge
 import cloud_storage
+import store
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -96,6 +97,27 @@ def get_link_status(ctx: Context) -> Dict[str, Any]:
         "session_id": doc["_id"],
         "status": status.get("status", doc.get("status")),
         **_qr_fields(doc["_id"], status.get("qr_png_base64")),
+    }
+
+
+@mcp.tool()
+def forget_me(ctx: Context) -> Dict[str, Any]:
+    """Permanently delete all of the caller's stored WhatsApp chat and message data
+    from this server's database.
+
+    This does not unlink your WhatsApp account or invalidate your api_token - you
+    can keep using the other tools afterward, and new messages will start being
+    stored again as they arrive. Chat/message data is also auto-deleted after a
+    couple of hours regardless (see get_link_status's session for details); this
+    tool is for when you want it gone immediately.
+    """
+    session_id = auth.resolve_session_id(ctx)
+    chats_deleted = store.chats().delete_many({"session_id": session_id}).deleted_count
+    messages_deleted = store.messages().delete_many({"session_id": session_id}).deleted_count
+    return {
+        "success": True,
+        "chats_deleted": chats_deleted,
+        "messages_deleted": messages_deleted,
     }
 
 
@@ -325,10 +347,10 @@ def download_media(ctx: Context, message_id: str, chat_jid: str) -> Dict[str, An
         media_url - a public link to the downloaded file.
     """
     session_id = auth.resolve_session_id(ctx)
-    file_path = whatsapp_download_media(session_id, message_id, chat_jid)
+    file_path, message = whatsapp_download_media(session_id, message_id, chat_jid)
 
     if not file_path:
-        return {"success": False, "message": "Failed to download media"}
+        return {"success": False, "message": message or "Failed to download media"}
 
     media_url = cloud_storage.upload_file(file_path, public_id=f"{session_id}/{message_id}")
     result = {"success": True, "message": "Media downloaded successfully"}
@@ -342,6 +364,10 @@ def download_media(ctx: Context, message_id: str, chat_jid: str) -> Dict[str, An
 
 
 if __name__ == "__main__":
+    # Periodically deletes Cloudinary uploads (QR codes, downloaded media) older
+    # than CLOUDINARY_TTL_SECONDS (default 2h) - a no-op if Cloudinary isn't configured.
+    cloud_storage.start_cleanup_loop()
+
     # Streamable HTTP so this one process can serve many users concurrently,
     # each identified by their own bearer token (see auth.py).
     mcp.run(transport='streamable-http')

@@ -160,6 +160,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			errMsg = err.Error()
 		}
+		fmt.Printf("[%s] Download failed for message %s in chat %s: %s\n", id, req.MessageID, req.ChatJID, errMsg)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(DownloadMediaResponse{
 			Success: false,

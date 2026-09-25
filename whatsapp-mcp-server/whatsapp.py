@@ -416,10 +416,9 @@ def send_audio_message(session_id: str, recipient: str, media_path: Optional[str
             os.remove(temp_path)
 
 
-def download_media(session_id: str, message_id: str, chat_jid: str) -> Optional[str]:
-    """Download media from a message and return the local file path."""
+def download_media(session_id: str, message_id: str, chat_jid: str) -> Tuple[Optional[str], str]:
+    """Download media from a message. Returns (local_path, message) - local_path is None on failure."""
     try:
         return bridge.download(session_id, message_id, chat_jid)
     except Exception as e:
-        print(f"Unexpected error downloading media: {str(e)}")
-        return None
+        return None, f"Unexpected error: {str(e)}"

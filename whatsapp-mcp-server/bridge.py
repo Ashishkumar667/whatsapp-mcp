@@ -49,7 +49,8 @@ def send(session_id: str, recipient: str, message: str = "", media_path: str = "
     return result.get("success", False), result.get("message", "Unknown response")
 
 
-def download(session_id: str, message_id: str, chat_jid: str) -> Optional[str]:
+def download(session_id: str, message_id: str, chat_jid: str) -> Tuple[Optional[str], str]:
+    """Returns (local_path, message). local_path is None on failure - message explains why."""
     resp = requests.post(
         f"{WHATSAPP_BRIDGE_URL}/internal/sessions/{session_id}/download",
         headers=_headers(), json={"message_id": message_id, "chat_jid": chat_jid}, timeout=60,
@@ -57,7 +58,7 @@ def download(session_id: str, message_id: str, chat_jid: str) -> Optional[str]:
     try:
         result = resp.json()
     except ValueError:
-        return None
+        return None, f"Error: HTTP {resp.status_code} - {resp.text}"
     if resp.status_code == 200 and result.get("success"):
-        return result.get("path")
-    return None
+        return result.get("path"), result.get("message", "")
+    return None, result.get("message") or result.get("error") or f"HTTP {resp.status_code}"
